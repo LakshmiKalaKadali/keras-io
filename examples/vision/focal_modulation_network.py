@@ -78,7 +78,9 @@ Keras 3 allows this model to run on JAX, PyTorch, or TensorFlow. We use keras.op
 import os
 
 # Set backend before importing keras
-os.environ["KERAS_BACKEND"] = "tensorflow"  # Or "torch" or "tensorflow"
+os.environ["KERAS_BACKEND"] = "tensorflow"  # or "torch" or "jax"
+# Suppress TensorFlow C++ logging (XLA messages)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import numpy as np
 import keras
@@ -86,6 +88,16 @@ from keras import layers
 from keras import ops
 from matplotlib import pyplot as plt
 from random import randint
+import warnings
+import logging
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*build.*method.*")
+warnings.filterwarnings("ignore", message=".*tf.function.*retracing.*")
+
+# Suppress TensorFlow logging
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 # Set seed for reproducibility using Keras 3 utility.
 keras.utils.set_random_seed(42)
@@ -837,7 +849,7 @@ history = model.fit(
     train_ds,
     validation_data=val_ds,
     epochs=EPOCHS,
-    callbacks=[TrainMonitor(epoch_interval=5)],
+    callbacks=[],
 )
 
 """
