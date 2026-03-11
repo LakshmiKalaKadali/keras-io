@@ -17,7 +17,7 @@ social and communication networks analysis, traffic prediction, and fraud detect
 [Graph representation Learning](https://www.cs.mcgill.ca/~wlh/grl_book/)
 aims to build and train models for graph datasets to be used for a variety of ML tasks.
 
-This example demonstrate a simple implementation of a [Graph Neural Network](https://arxiv.org/pdf/1901.00596.pdf)
+This example demonstrate a simple implementation of a [Graph Neural Network](https://arxiv.org/abs/1901.00596)
 (GNN) model. The model is used for a node prediction task on the [Cora dataset](https://relational.fit.cvut.cz/dataset/CORA)
 to predict the subject of a paper given its words and citations network.
 
@@ -35,39 +35,32 @@ libraries that provide rich GNN APIs, such as [Spectral](https://graphneural.net
 import os
 
 # Choose backend: "jax", "torch", or "tensorflow"
-os.environ["KERAS_BACKEND"] = "jax"
-
+os.environ["KERAS_BACKEND"] = "tensorflow"
 import pandas as pd
 import numpy as np
 import networkx as nx
 import matplotlib
 
-matplotlib.use("Agg")  # Use non-interactive backend
+# matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import keras
 from keras import layers, ops
-
 
 keras.utils.set_random_seed(42)
 rng = np.random.default_rng(42)
 
 """
-## Prepare the Dataset
+## Prepare and Download the Dataset
 
 The Cora dataset consists of 2,708 scientific papers classified into one of seven classes.
 The citation network consists of 5,429 links. Each paper has a binary word vector of size
 1,433, indicating the presence of a corresponding word.
-
-### Download the dataset
-
 The dataset has two tap-separated files: `cora.cites` and `cora.content`.
 
 1. The `cora.cites` includes the citation records with two columns:
 `cited_paper_id` (target) and `citing_paper_id` (source).
 2. The `cora.content` includes the paper content records with 1,435 columns:
 `paper_id`, `subject`, and 1,433 binary features.
-
-Let's download the dataset.
 """
 
 zip_file = keras.utils.get_file(
@@ -79,8 +72,6 @@ data_dir = os.path.join(os.path.dirname(zip_file), "cora_extracted", "cora")
 
 """
 ### Process and visualize the dataset
-
-Then we load the citations data into a Pandas DataFrame.
 """
 
 citations = pd.read_csv(
@@ -91,13 +82,7 @@ citations = pd.read_csv(
 )
 print("Citations shape:", citations.shape)
 
-
-"""
-Now we display a sample of the `citations` DataFrame.
-The `target` column includes the paper ids cited by the paper ids in the `source` column.
-"""
-
-citations.sample(frac=1).head()
+citations.sample(frac=1).head()  # display a sample of the `citations` DataFrame
 
 """
 Now let's load the papers data into a Pandas DataFrame.
@@ -151,6 +136,7 @@ colors = papers["subject"].tolist()
 cora_graph = nx.from_pandas_edgelist(citations.sample(n=1500))
 subjects = list(papers[papers["paper_id"].isin(list(cora_graph.nodes))]["subject"])
 nx.draw_spring(cora_graph, node_size=15, node_color=subjects)
+plt.show()
 
 
 """
@@ -159,7 +145,7 @@ nx.draw_spring(cora_graph, node_size=15, node_color=subjects)
 
 train_ids, val_ids, test_ids = [], [], []
 for cls, group in papers.groupby("subject"):
-    ids = group["paper_id"].to_numpy()
+    ids = group["paper_id"].to_numpy().copy()
     rng.shuffle(ids)
 
     n = len(ids)
@@ -248,6 +234,7 @@ def display_learning_curves(history, title=None):
     ax2.legend(["train", "val"], loc="upper right")
     ax2.set_xlabel("Epochs")
     ax2.set_ylabel("Accuracy")
+    plt.show()
 
 
 """
@@ -414,11 +401,11 @@ We implement the graph convolution module as a custom Keras 3 Layer. Our GraphCo
 to be backend-agnostic, utilizing keras.ops to perform the following three steps:
 
 1. **Prepare**: The input node representations are processed using a Feed-Forward Network (FFN) to produce a message.
-This is achieved by gathering neighbor representations using ops.take and transforming them through the ffn_prepare block. 
+This is achieved by gathering neighbor representations using ops.take and transforming them through the ffn_prepare block.
 If edge_weights are provided, they are scaled using ops.expand_dims to ensure correct broadcasting during message transformation
-2. **Aggregate**: The messages of the neighbors for each node are aggregated using a permutation-invariant pooling operation. 
+2. **Aggregate**: The messages of the neighbors for each node are aggregated using a permutation-invariant pooling operation.
 In this Keras 3 implementation, we utilize ops.segment_sum, ops.segment_mean, or ops.segment_max (replacing the legacy tf.math.unsorted_segment APIs).
-These operations efficiently aggregate neighbor information into a single message for each target node based on the graph's edge indices..
+These operations efficiently aggregate neighbor information into a single message for each target node based on the graph's edge indices.
 3. **Update**: The `node_repesentations` and `aggregated_messages`—both of shape `[num_nodes, representation_dim]`—
 are combined and processed to produce the new state of the node representations (node embeddings).
 If `combination_type` is `gru`, the `node_repesentations` and `aggregated_messages` are stacked to create a sequence,
@@ -535,19 +522,19 @@ class GraphConvLayer(layers.Layer):
 The GNN classification model follows the [Design Space for Graph Neural Networks](https://arxiv.org/abs/2011.08843) approach,
 as follows:
 
-**Graph Augmentation & Stability:** In the __init__ method, the model optionally adds self-loops to the edge list. 
+**Graph Augmentation & Stability:** In the __init__ method, the model optionally adds self-loops to the edge list.
 This ensures each node preserves its own identity during message passing. We also implement Edge Weight Normalization (Global or Per-node).
-Per-node normalization calculates the degree of each node using ops.segment_sum and scales incoming messages, 
+Per-node normalization calculates the degree of each node using ops.segment_sum and scales incoming messages,
 which is critical for preventing gradient explosion in large or dense graphs.
 **Preprocessing:** A Feed-Forward Network (FFN) is applied to the raw node features to generate the initial latent representations.
 **Graph Convolutions with Skip Connections:** The model applies multiple GraphConvLayer blocks.
-To mitigate the risk of "over-smoothing" (where node embeddings become indistinguishable after several hops), 
+To mitigate the risk of "over-smoothing" (where node embeddings become indistinguishable after several hops),
 we implement Residual (Skip) Connections, adding the input of the convolution back to its output.
 **Post-processing:** A final FFN processes the node embeddings to refine the features before classification.
 **Output Logic:** The final layer is a Dense layer that produces logits for each class.
-**Note on Data Handling:** Unlike standard models where all data is passed as input, this model stores 
-the global graph structure (node_features and edges) as internal tensors converted via ops.convert_to_tensor. 
-The model's call() method accepts a batch of node indices rather than the full graph. 
+**Note on Data Handling:** Unlike standard models where all data is passed as input, this model stores
+the global graph structure (node_features and edges) as internal tensors converted via ops.convert_to_tensor.
+The model's call() method accepts a batch of node indices rather than the full graph.
 It uses ops.take to efficiently retrieve the specific embeddings for the requested indices,
 allowing for efficient mini-batch training on a single large graph.
 
