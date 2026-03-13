@@ -35,7 +35,6 @@ documentation.
 
 import os
 
-
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import keras
@@ -220,7 +219,7 @@ class GraphAttention(layers.Layer):
 
         # Broadcast sum back to edges to normalize
         attention_sum_per_edge = ops.take(attention_sum, target_indices, axis=0)
-        attention_norm = attention_scores / (attention_sum_per_edge + 1e-8)
+        attention_norm = attention_scores / ops.maximum(attention_sum_per_edge, 1e-8)
 
         node_states_neighbors = ops.take(z, source_indices, axis=0)
         weighted_neighbors = node_states_neighbors * ops.expand_dims(
@@ -255,8 +254,8 @@ class MultiHeadGraphAttention(layers.Layer):
 ### Implement the Graph Attention Network
 
 The GAT model operates on the entire graph (both node_states and edges) during all phases.
-To maintain backend agnosticism and leverage Keras 3's built-in training optimizations, 
-we store the graph data as internal tensors and design the call method to accept 
+To maintain backend agnosticism and leverage Keras 3's built-in training optimizations,
+we store the graph data as internal tensors and design the call method to accept
 the target node indices as its primary input.
 """
 
