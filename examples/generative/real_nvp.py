@@ -36,7 +36,7 @@ import os
 os.environ["KERAS_BACKEND"] = "jax"
 
 import keras
-from keras import layers, ops, regularizers, random
+from keras import layers, ops, regularizers
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_moons
