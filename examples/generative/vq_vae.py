@@ -125,8 +125,8 @@ class VectorQuantizer(layers.Layer):
         # Calculate L2-normalized distance
         similarity = ops.matmul(flattened_inputs, self.embeddings)
         distances = (
-            ops.sum(flattened_inputs**2, axis=1, keepdims=True)
-            + ops.sum(self.embeddings**2, axis=0)
+            ops.sum(ops.square(flattened_inputs), axis=1, keepdims=True)
+            + ops.sum(ops.square(self.embeddings), axis=0)
             - 2 * similarity
         )
         return ops.argmin(distances, axis=1)
@@ -159,7 +159,8 @@ train, resulting in intermittent loss spikes that the model has trouble recoveri
 
 
 def get_encoder(latent_dim=16):
-    encoder_inputs = keras.Input(shape=(28, 28, 1))
+    input_shape = (28, 28, 1)
+    encoder_inputs = keras.Input(shape=input_shape)
     x = layers.Conv2D(32, 3, activation="relu", strides=2, padding="same")(
         encoder_inputs
     )
@@ -183,12 +184,12 @@ def get_decoder(latent_dim=16):
 """
 
 
-def get_vqvae(latent_dim=16, num_embeddings=64):
+def get_vqvae(latent_dim=16, num_embeddings=128):
     vq_layer = VectorQuantizer(num_embeddings, latent_dim, name="vector_quantizer")
     encoder = get_encoder(latent_dim)
     decoder = get_decoder(latent_dim)
-
-    inputs = keras.Input(shape=(28, 28, 1))
+    
+    inputs = keras.Input(shape=input_shape)
     encoder_outputs = encoder(inputs)
 
     # quantized_latents and codebook_indices are now KerasTensors
@@ -210,7 +211,6 @@ quantizer.
 """
 ## Wrapping up the training loop inside `VQVAETrainer`
 """
-
 
 class VQVAETrainer(keras.Model):
     def __init__(self, train_variance, latent_dim=32, num_embeddings=128, **kwargs):
