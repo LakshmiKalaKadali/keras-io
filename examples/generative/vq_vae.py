@@ -185,10 +185,11 @@ def get_decoder(latent_dim=16):
 
 
 def get_vqvae(latent_dim=16, num_embeddings=128):
+    input_shape = (28, 28, 1)
     vq_layer = VectorQuantizer(num_embeddings, latent_dim, name="vector_quantizer")
     encoder = get_encoder(latent_dim)
     decoder = get_decoder(latent_dim)
-    
+
     inputs = keras.Input(shape=input_shape)
     encoder_outputs = encoder(inputs)
 
@@ -211,6 +212,7 @@ quantizer.
 """
 ## Wrapping up the training loop inside `VQVAETrainer`
 """
+
 
 class VQVAETrainer(keras.Model):
     def __init__(self, train_variance, latent_dim=32, num_embeddings=128, **kwargs):
@@ -460,7 +462,7 @@ class ResidualBlock(layers.Layer):
 
 # Build PixelCNN
 pixelcnn_inputs = keras.Input(shape=(7, 7), dtype="int32")
-ohe = ops.one_hot(pixelcnn_inputs, 128)
+ohe = ops.one_hot(pixelcnn_inputs, vqvae_trainer.num_embeddings)
 x = PixelConvLayer(
     mask_type="A", filters=128, kernel_size=7, activation="relu", padding="same"
 )(ohe)
@@ -470,7 +472,9 @@ for _ in range(num_pixelcnn_layers):
     x = PixelConvLayer(
         mask_type="B", filters=128, kernel_size=1, activation="relu", padding="valid"
     )(x)
-out = layers.Conv2D(filters=128, kernel_size=1, padding="valid")(x)
+out = layers.Conv2D(
+    filters=vqvae_trainer.num_embeddings, kernel_size=1, padding="valid"
+)(x)
 pixel_cnn = keras.Model(pixelcnn_inputs, out, name="pixel_cnn")
 
 pixel_cnn.summary()
@@ -521,7 +525,7 @@ them to our decoder to generate novel images.
 
 # Create a mini sampler model.
 def sample_from_logits(logits):
-    logits_flat = ops.reshape(logits, (-1, 128))
+    logits_flat = ops.reshape(logits, (-1, vqvae_trainer.num_embeddings))
     sampled = random.categorical(logits_flat, 1)
     return ops.reshape(sampled, ops.shape(logits)[:-1])
 
@@ -549,9 +553,9 @@ We can now use our decoder to generate the images.
 
 # Perform an embedding lookup.
 pretrained_embeddings = quantizer.embeddings
-priors_ohe = ops.one_hot(priors, 128)
+priors_ohe = ops.one_hot(priors, vqvae_trainer.num_embeddings)
 quantized = ops.matmul(priors_ohe, ops.transpose(pretrained_embeddings))
-quantized = ops.reshape(quantized, (-1, 7, 7, 16))
+quantized = ops.reshape(quantized, (-1, 7, 7, vqvae_trainer.latent_dim))
 
 decoder = vqvae_trainer.vqvae.get_layer("decoder")
 generated_samples = decoder.predict(quantized)
