@@ -40,15 +40,19 @@ We fine-tune a BERT model to perform this task as follows:
 ## Setup
 """
 import os
+
+os.environ["KERAS_BACKEND"] = "jax"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 import re
 import json
 import string
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+import keras
+from keras import layers
+from keras import ops
+import keras_hub
 from tokenizers import BertWordPieceTokenizer
-import keras_nlp
 
 # from transformers import BertTokenizer, TFBertModel, BertConfig
 
@@ -62,17 +66,14 @@ LEARNING_RATE = 3e-5
 """
 ## Set-up BERT tokenizer
 
-We fetch the vocabulary directly from the keras_nlp preset to ensure
+We fetch the vocabulary directly from the keras_hub preset to ensure
 that the Token IDs match the model weights exactly.
 """
 
-tokenizer_nlp = keras_nlp.models.BertTokenizer.from_preset(PRESET)
+tokenizer_nlp = keras_hub.models.BertTokenizer.from_preset(PRESET)
 vocab = tokenizer_nlp.get_vocabulary()
-with open("vocab.txt", "w", encoding="utf-8") as f:
-    for item in vocab:
-        f.write(item + "\n")
-
-tokenizer = BertWordPieceTokenizer("vocab.txt", lowercase=True)
+vocab_dict = {word: i for i, word in enumerate(vocab)}
+tokenizer = BertWordPieceTokenizer(vocab=vocab_dict, lowercase=True)
 
 
 """
@@ -230,7 +231,7 @@ Create the Question-Answering Model using BERT and Functional API
 
 
 def create_model():
-    backbone = keras_nlp.models.BertBackbone.from_preset(PRESET)
+    backbone = keras_hub.models.BertBackbone.from_preset(PRESET)
 
     input_ids = layers.Input(shape=(max_len,), dtype="int32", name="input_ids")
     token_type_ids = layers.Input(
@@ -313,10 +314,10 @@ class ExactMatch(keras.callbacks.Callback):
         pred_end = ops.convert_to_numpy(ops.softmax(pred_end_logits))
 
         count = 0
-        for idx, (s_probs, e_probs) in enumerate(zip(pred_start, pred_end)):
+        for idx, (start_probs, end_probs) in enumerate(zip(pred_start, pred_end)):
             squad_eg = valid_data_no_skip[idx]
             offsets = squad_eg.context_token_to_char
-            start, end = np.argmax(s_probs), np.argmax(e_probs)
+            start, end = np.argmax(start_probs), np.argmax(end_probs)
             if start >= len(offsets):
                 continue
             p_start = offsets[start][0]
