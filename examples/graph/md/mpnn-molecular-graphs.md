@@ -68,7 +68,7 @@ However, thanks to
 can now (for the sake of this tutorial) be installed easily via pip, as follows:
 
 ```
-pip -q install rdkit-pypi
+pip -q install rdkit
 ```
 
 And for easy and efficient reading of csv files and visualization, the below needs to be
@@ -79,7 +79,7 @@ pip -q install pandas
 pip -q install Pillow
 pip -q install matplotlib
 pip -q install pydot
-sudo apt-get -qq install graphviz
+pip -q install graphviz
 ```
 
 ### Import packages
@@ -88,27 +88,33 @@ sudo apt-get -qq install graphviz
 ```python
 import os
 
-# Temporary suppress tf logs
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+# Set backend before importing keras (Options: 'jax', 'torch', 'tensorflow')
+os.environ["KERAS_BACKEND"] = "tensorflow"
 
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+import keras
+from keras import layers, ops, regularizers
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import warnings
 from rdkit import Chem
 from rdkit import RDLogger
-from rdkit.Chem.Draw import IPythonConsole
 from rdkit.Chem.Draw import MolsToGridImage
+from tqdm import tqdm
 
 # Temporary suppress warnings and RDKit logs
 warnings.filterwarnings("ignore")
 RDLogger.DisableLog("rdApp.*")
 
-np.random.seed(42)
-tf.random.set_seed(42)
+# Set random seeds using Keras 3 utility
+keras.utils.set_random_seed(42)
+
+# --- GLOBAL CONFIGURATION ---
+MAX_ATOMS = 70  # Maximum atoms per molecule
+MAX_BONDS = 150  # Maximum bonds per molecule
+BATCH_SIZE = 64  # Increased for faster GPU utilization
+EPOCHS = 40
+LEARNING_RATE = 5e-4
 ```
 
 ---
@@ -135,7 +141,6 @@ data set are binary (1 or 0) and indicate the permeability of the molecules.
 csv_path = keras.utils.get_file(
     "BBBP.csv", "https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/BBBP.csv"
 )
-
 df = pd.read_csv(csv_path, usecols=[1, 2, 3])
 df.iloc[96:104]
 ```
@@ -253,19 +258,15 @@ class Featurizer:
             self.dim += len(s)
 
     def encode(self, inputs):
-        output = np.zeros((self.dim,))
+        output = np.zeros((self.dim,), dtype="float32")
         for name_feature, feature_mapping in self.features_mapping.items():
             feature = getattr(self, name_feature)(inputs)
-            if feature not in feature_mapping:
-                continue
-            output[feature_mapping[feature]] = 1.0
+            if feature in feature_mapping:
+                output[feature_mapping[feature]] = 1.0
         return output
 
 
 class AtomFeaturizer(Featurizer):
-    def __init__(self, allowable_sets):
-        super().__init__(allowable_sets)
-
     def symbol(self, atom):
         return atom.GetSymbol()
 
@@ -285,11 +286,14 @@ class BondFeaturizer(Featurizer):
         self.dim += 1
 
     def encode(self, bond):
-        output = np.zeros((self.dim,))
+        output = np.zeros((self.dim,), dtype="float32")
         if bond is None:
             output[-1] = 1.0
             return output
-        output = super().encode(bond)
+        for name_feature, feature_mapping in self.features_mapping.items():
+            feature = getattr(self, name_feature)(bond)
+            if feature in feature_mapping:
+                output[feature_mapping[feature]] = 1.0
         return output
 
     def bond_type(self, bond):
@@ -300,16 +304,15 @@ class BondFeaturizer(Featurizer):
 
 
 atom_featurizer = AtomFeaturizer(
-    allowable_sets={
+    {
         "symbol": {"B", "Br", "C", "Ca", "Cl", "F", "H", "I", "N", "Na", "O", "P", "S"},
         "n_valence": {0, 1, 2, 3, 4, 5, 6},
         "n_hydrogens": {0, 1, 2, 3, 4},
         "hybridization": {"s", "sp", "sp2", "sp3"},
     }
 )
-
 bond_featurizer = BondFeaturizer(
-    allowable_sets={
+    {
         "bond_type": {"single", "double", "triple", "aromatic"},
         "conjugated": {True, False},
     }
@@ -319,109 +322,223 @@ bond_featurizer = BondFeaturizer(
 
 ### Generate graphs
 
-Before we can generate complete graphs from SMILES, we need to implement the following functions:
+Before generating complete graphs from SMILES, we need to implement the following functions:
 
-1. `molecule_from_smiles`, which takes as input a SMILES and returns a molecule object.
-This is all handled by RDKit.
-
-2. `graph_from_molecule`, which takes as input a molecule object and returns a graph,
-represented as a three-tuple (atom_features, bond_features, pair_indices). For this we
-will make use of the classes defined previously.
-
-Finally, we can now implement the function `graphs_from_smiles`, which applies function (1)
-and subsequently (2) on all SMILES of the training, validation and test datasets.
-
-Notice: although scaffold splitting is recommended for this data set (see
-[here](https://arxiv.org/abs/1703.00564)), for simplicity, simple random splittings were
-performed.
+1. `molecule_from_smiles`: This takes a SMILES string as input and returns an RDKit molecule object. This process remains handled by RDKit on the CPU.
+2. `smiles_to_graph`: This takes a SMILES string and returns a graph represented as a four-tuple: (atom_features, bond_features, pair_indices, mask).
+The original implementation utilized tf.RaggedTensor, which is exclusive to TensorFlow. To remain backend-agnostic and support JAX and PyTorch, we now use fixed-size buffers (MAX_ATOMS and MAX_BONDS). We also introduce a mask—a boolean array that allows the model to distinguish between valid chemical data and zero-padding.
+Finally, implemented a pre-featurization step. Instead of featurizing during the training loop (which creates a CPU bottleneck), we process all SMILES once and store them in a list of NumPy arrays. This allows the GPU backends to run at 100% efficiency.
 
 
 ```python
 
 def molecule_from_smiles(smiles):
-    # MolFromSmiles(m, sanitize=True) should be equivalent to
-    # MolFromSmiles(m, sanitize=False) -> SanitizeMol(m) -> AssignStereochemistry(m, ...)
+    # Standard RDKit sanitization and stereochemistry assignment
     molecule = Chem.MolFromSmiles(smiles, sanitize=False)
-
-    # If sanitization is unsuccessful, catch the error, and try again without
-    # the sanitization step that caused the error
     flag = Chem.SanitizeMol(molecule, catchErrors=True)
     if flag != Chem.SanitizeFlags.SANITIZE_NONE:
         Chem.SanitizeMol(molecule, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL ^ flag)
-
     Chem.AssignStereochemistry(molecule, cleanIt=True, force=True)
     return molecule
 
 
-def graph_from_molecule(molecule):
-    # Initialize graph
-    atom_features = []
-    bond_features = []
-    pair_indices = []
+def smiles_to_graph(smiles):
+    """
+    Converts SMILES to a graph with fixed-size buffers for Keras 3 compatibility.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if not mol:
+        return None
 
-    for atom in molecule.GetAtoms():
-        atom_features.append(atom_featurizer.encode(atom))
+    # Pre-allocate fixed buffers for static shapes (required for JAX/Torch)
+    a_feat = np.zeros((MAX_ATOMS, atom_featurizer.dim), dtype="float32")
+    b_feat = np.zeros((MAX_BONDS, bond_featurizer.dim), dtype="float32")
+    p_idx = np.zeros((MAX_BONDS, 2), dtype="int32")
+    mask = np.zeros((MAX_ATOMS,), dtype="float32")
 
-        # Add self-loops
-        pair_indices.append([atom.GetIdx(), atom.GetIdx()])
-        bond_features.append(bond_featurizer.encode(None))
+    atoms = mol.GetAtoms()
+    for i, atom in enumerate(atoms):
+        if i >= MAX_ATOMS:
+            break
+        a_feat[i] = atom_featurizer.encode(atom)
+        mask[i] = 1.0
 
-        for neighbor in atom.GetNeighbors():
-            bond = molecule.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
-            pair_indices.append([atom.GetIdx(), neighbor.GetIdx()])
-            bond_features.append(bond_featurizer.encode(bond))
+    b_count = 0
+    for i, atom in enumerate(atoms):
+        if i >= MAX_ATOMS or b_count >= MAX_BONDS:
+            break
+        # Add self-loop (standard in MPNN)
+        p_idx[b_count] = [i, i]
+        b_feat[b_count] = bond_featurizer.encode(None)
+        b_count += 1
 
-    return np.array(atom_features), np.array(bond_features), np.array(pair_indices)
+        for nb in atom.GetNeighbors():
+            j = nb.GetIdx()
+            if j >= MAX_ATOMS or b_count >= MAX_BONDS:
+                continue
+            p_idx[b_count] = [i, j]
+            b_feat[b_count] = bond_featurizer.encode(mol.GetBondBetweenAtoms(i, j))
+            b_count += 1
+
+    return a_feat, b_feat, p_idx, mask
 
 
-def graphs_from_smiles(smiles_list):
-    # Initialize graphs
-    atom_features_list = []
-    bond_features_list = []
-    pair_indices_list = []
+csv_path = keras.utils.get_file(
+    "BBBP.csv", "https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/BBBP.csv"
+)
+df = pd.read_csv(csv_path, usecols=[1, 2, 3])
 
-    for smiles in smiles_list:
-        molecule = molecule_from_smiles(smiles)
-        atom_features, bond_features, pair_indices = graph_from_molecule(molecule)
+# Pre-featurize the entire dataset once to remove the RDKit bottleneck during training
+print("Pre-featurizing Dataset...")
+processed_data = []
+for s in tqdm(df.smiles.values):
+    graph = smiles_to_graph(s)
+    if graph is None:
+        # Placeholder for failed molecules to maintain index alignment
+        processed_data.append(
+            (
+                np.zeros((MAX_ATOMS, atom_featurizer.dim)),
+                np.zeros((MAX_BONDS, bond_featurizer.dim)),
+                np.zeros((MAX_BONDS, 2), dtype="int32"),
+                np.zeros((MAX_ATOMS,)),
+            )
+        )
+    else:
+        processed_data.append(graph)
 
-        atom_features_list.append(atom_features)
-        bond_features_list.append(bond_features)
-        pair_indices_list.append(pair_indices)
-
-    # Convert lists to ragged tensors for tf.data.Dataset later on
-    return (
-        tf.ragged.constant(atom_features_list, dtype=tf.float32),
-        tf.ragged.constant(bond_features_list, dtype=tf.float32),
-        tf.ragged.constant(pair_indices_list, dtype=tf.int64),
+print("Pre-featurizing Dataset...")
+processed_data = [
+    smiles_to_graph(s)
+    or (
+        np.zeros((MAX_ATOMS, atom_featurizer.dim)),
+        np.zeros((MAX_BONDS, bond_featurizer.dim)),
+        np.zeros((MAX_BONDS, 2), dtype="int32"),
+        np.zeros((MAX_ATOMS,)),
     )
+    for s in tqdm(df.smiles.values)
+]
 
-
-# Shuffle array of indices ranging from 0 to 2049
-permuted_indices = np.random.permutation(np.arange(df.shape[0]))
-
-# Train set: 80 % of data
-train_index = permuted_indices[: int(df.shape[0] * 0.8)]
-x_train = graphs_from_smiles(df.iloc[train_index].smiles)
-y_train = df.iloc[train_index].p_np
-
-# Valid set: 19 % of data
-valid_index = permuted_indices[int(df.shape[0] * 0.8) : int(df.shape[0] * 0.99)]
-x_valid = graphs_from_smiles(df.iloc[valid_index].smiles)
-y_valid = df.iloc[valid_index].p_np
-
-# Test set: 1 % of data
-test_index = permuted_indices[int(df.shape[0] * 0.99) :]
-x_test = graphs_from_smiles(df.iloc[test_index].smiles)
-y_test = df.iloc[test_index].p_np
 ```
+
+<div class="k-default-codeblock">
+```
+Pre-featurizing Dataset...
+```
+</div>
+
+  0%|                                                                                                                             | 0/2050 [00:00<?, ?it/s]
+
+    
+  6%|███████▏                                                                                                         | 131/2050 [00:00<00:01, 1296.41it/s]
+
+    
+ 13%|██████████████▍                                                                                                  | 261/2050 [00:00<00:01, 1282.34it/s]
+
+    
+ 21%|███████████████████████▌                                                                                         | 428/2050 [00:00<00:01, 1455.97it/s]
+
+    
+ 31%|██████████████████████████████████▌                                                                              | 626/2050 [00:00<00:00, 1660.01it/s]
+
+    
+ 39%|███████████████████████████████████████████▋                                                                     | 793/2050 [00:00<00:00, 1511.94it/s]
+
+    
+ 46%|████████████████████████████████████████████████████▏                                                            | 947/2050 [00:00<00:00, 1343.13it/s]
+
+    
+ 53%|███████████████████████████████████████████████████████████▎                                                    | 1086/2050 [00:00<00:00, 1313.89it/s]
+
+    
+ 60%|███████████████████████████████████████████████████████████████████▋                                            | 1240/2050 [00:00<00:00, 1376.79it/s]
+
+    
+ 70%|██████████████████████████████████████████████████████████████████████████████▊                                 | 1443/2050 [00:00<00:00, 1564.21it/s]
+
+    
+ 79%|████████████████████████████████████████████████████████████████████████████████████████▏                       | 1614/2050 [00:01<00:00, 1602.32it/s]
+
+    
+ 88%|██████████████████████████████████████████████████████████████████████████████████████████████████▎             | 1800/2050 [00:01<00:00, 1675.97it/s]
+
+    
+ 97%|████████████████████████████████████████████████████████████████████████████████████████████████████████████▋   | 1989/2050 [00:01<00:00, 1701.72it/s]
+
+    
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2050/2050 [00:01<00:00, 1543.60it/s]
+
+    
+
+
+<div class="k-default-codeblock">
+```
+Pre-featurizing Dataset...
+```
+</div>
+
+  0%|                                                                                                                             | 0/2050 [00:00<?, ?it/s]
+
+    
+  5%|█████▍                                                                                                             | 97/2050 [00:00<00:02, 968.10it/s]
+
+    
+ 12%|█████████████▎                                                                                                   | 242/2050 [00:00<00:01, 1249.74it/s]
+
+    
+ 19%|█████████████████████▏                                                                                           | 384/2050 [00:00<00:01, 1316.87it/s]
+
+    
+ 26%|█████████████████████████████▋                                                                                   | 539/2050 [00:00<00:01, 1407.54it/s]
+
+    
+ 33%|█████████████████████████████████████▍                                                                           | 680/2050 [00:00<00:00, 1404.05it/s]
+
+    
+ 40%|█████████████████████████████████████████████▎                                                                   | 821/2050 [00:00<00:00, 1333.07it/s]
+
+    
+ 47%|████████████████████████████████████████████████████▋                                                            | 955/2050 [00:00<00:01, 1050.55it/s]
+
+    
+ 53%|███████████████████████████████████████████████████████████▉                                                    | 1096/2050 [00:00<00:00, 1143.62it/s]
+
+    
+ 60%|██████████████████████████████████████████████████████████████████▊                                             | 1223/2050 [00:01<00:00, 1168.01it/s]
+
+    
+ 68%|███████████████████████████████████████████████████████████████████████████▊                                    | 1387/2050 [00:01<00:00, 1295.31it/s]
+
+    
+ 74%|███████████████████████████████████████████████████████████████████████████████████▎                            | 1525/2050 [00:01<00:00, 1317.77it/s]
+
+    
+ 82%|███████████████████████████████████████████████████████████████████████████████████████████▎                    | 1672/2050 [00:01<00:00, 1360.91it/s]
+
+    
+ 88%|██████████████████████████████████████████████████████████████████████████████████████████████████▉             | 1811/2050 [00:01<00:00, 1356.49it/s]
+
+    
+ 95%|██████████████████████████████████████████████████████████████████████████████████████████████████████████▍     | 1949/2050 [00:01<00:00, 1322.66it/s]
+
+    
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2050/2050 [00:01<00:00, 1278.10it/s]
+
+    
+
 
 ### Test the functions
 
+We can now inspect a sample molecule and its corresponding graph representation. Note that the output shapes are now constant (e.g., 70 atoms and 150 bonds), ensuring compatibility across all Keras 3 backends.
+
 
 ```python
-print(f"Name:\t{df.name[100]}\nSMILES:\t{df.smiles[100]}\nBBBP:\t{df.p_np[100]}")
-molecule = molecule_from_smiles(df.iloc[100].smiles)
-print("Molecule:")
+sample_idx = 100
+print(
+    f"Name:\t{df.name[sample_idx]}\nSMILES:\t{df.smiles[sample_idx]}\nBBBP:\t{df.p_np[sample_idx]}"
+)
+
+molecule = molecule_from_smiles(df.smiles.values[sample_idx])
+print("Molecule object created successfully.")
 molecule
 ```
 
@@ -430,11 +547,10 @@ molecule
 Name:	acetylsalicylate
 SMILES:	CC(=O)Oc1ccccc1C(O)=O
 BBBP:	0
-Molecule:
-
+Molecule object created successfully.
 ```
 </div>
-    
+
 ![png](/img/examples/graph/mpnn-molecular-graphs/mpnn-molecular-graphs_12_1.png)
     
 
@@ -442,69 +558,117 @@ Molecule:
 
 
 ```python
-graph = graph_from_molecule(molecule)
-print("Graph (including self-loops):")
-print("\tatom features\t", graph[0].shape)
-print("\tbond features\t", graph[1].shape)
-print("\tpair indices\t", graph[2].shape)
+# Convert to graph and check constant shapes
+a, b, p, m = smiles_to_graph(df.smiles.values[sample_idx])
+print("Graph (including self-loops and padding):")
+print(f"\tatom features\t {a.shape}")
+print(f"\tbond features\t {b.shape}")
+print(f"\tpair indices \t {p.shape}")
+```
+
+<div class="k-default-codeblock">
+```
+Graph (including self-loops and padding):
+	atom features	 (70, 29)
+	bond features	 (150, 7)
+	pair indices 	 (150, 2)
+```
+</div>
+
+### Data Loading with PyDataset
+
+In this tutorial, the MPNN implementation takes a single graph as input per iteration.
+To process a batch of molecules, we merge them into a single global graph (also known as a disjoint graph).
+This global graph is a disconnected structure where each molecule (subgraph) is separated from the others.
+
+
+```python
+
+class MPNNDataset(keras.utils.PyDataset):
+    def __init__(self, data, labels, batch_size=64, shuffle=False, **kwargs):
+        super().__init__(**kwargs)
+        self.data, self.labels, self.batch_size, self.shuffle = (
+            data,
+            labels,
+            batch_size,
+            shuffle,
+        )
+        self.indices = np.arange(len(data))
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+    def __len__(self):
+        return int(np.ceil(len(self.indices) / self.batch_size))
+
+    def __getitem__(self, idx):
+        start, end = idx * self.batch_size, min(
+            (idx + 1) * self.batch_size, len(self.indices)
+        )
+        batch_idx = self.indices[start:end]
+        a = np.zeros((self.batch_size, MAX_ATOMS, atom_featurizer.dim), dtype="float32")
+        b = np.zeros((self.batch_size, MAX_BONDS, bond_featurizer.dim), dtype="float32")
+        p = np.zeros((self.batch_size, MAX_BONDS, 2), dtype="int32")
+        m = np.zeros((self.batch_size, MAX_ATOMS), dtype="float32")
+        y = np.zeros((self.batch_size, 1), dtype="float32")
+
+        for i, real_idx in enumerate(batch_idx):
+            a[i], b[i], p[i], m[i] = self.data[real_idx]
+            y[i] = self.labels[real_idx]
+            p[i] += i * MAX_ATOMS
+
+        return {
+            "atom_features": ops.convert_to_tensor(a.reshape(-1, atom_featurizer.dim)),
+            "bond_features": ops.convert_to_tensor(b.reshape(-1, bond_featurizer.dim)),
+            "pair_indices": ops.convert_to_tensor(p.reshape(-1, 2)),
+            "molecule_indicator": ops.convert_to_tensor(
+                np.repeat(np.arange(self.batch_size), MAX_ATOMS), dtype="int32"
+            ),
+            "mask": ops.convert_to_tensor(m.reshape(-1)),
+        }, ops.convert_to_tensor(y)
+
+    def on_epoch_end(self):
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+
+# Shuffle and split the data indices
+perm = np.random.permutation(len(processed_data))
+
+# Train: 80% | Valid: 19% | Test: 1%
+train_idx = perm[: int(len(df) * 0.8)]
+val_idx = perm[int(len(df) * 0.8) : int(len(df) * 0.99)]
+test_idx = perm[int(len(df) * 0.99) :]
+
+# Create the PyDatasets
+train_dataset = MPNNDataset(
+    [processed_data[i] for i in train_idx],
+    df.p_np.values[train_idx],
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+)
+
+valid_dataset = MPNNDataset(
+    [processed_data[i] for i in val_idx], df.p_np.values[val_idx], batch_size=BATCH_SIZE
+)
+
+# Instantiate the test dataset
+test_dataset = MPNNDataset(
+    [processed_data[i] for i in test_idx],
+    df.p_np.values[test_idx],
+    batch_size=BATCH_SIZE,
+)
+
+print(
+    f"Dataset Split: Train={len(train_idx)}, Valid={len(val_idx)}, Test={len(test_idx)}"
+)
 
 ```
 
 <div class="k-default-codeblock">
 ```
-Graph (including self-loops):
-	atom features	 (13, 29)
-	bond features	 (39, 7)
-	pair indices	 (39, 2)
-
+Dataset Split: Train=1640, Valid=389, Test=21
 ```
 </div>
-### Create a `tf.data.Dataset`
-
-In this tutorial, the MPNN implementation will take as input (per iteration) a single graph.
-Therefore, given a batch of (sub)graphs (molecules), we need to merge them into a
-single graph (we'll refer to this graph as *global graph*).
-This global graph is a disconnected graph where each subgraph is
-completely separated from the other subgraphs.
-
-
-```python
-
-def prepare_batch(x_batch, y_batch):
-    """Merges (sub)graphs of batch into a single global (disconnected) graph
-    """
-
-    atom_features, bond_features, pair_indices = x_batch
-
-    # Obtain number of atoms and bonds for each graph (molecule)
-    num_atoms = atom_features.row_lengths()
-    num_bonds = bond_features.row_lengths()
-
-    # Obtain partition indices (molecule_indicator), which will be used to
-    # gather (sub)graphs from global graph in model later on
-    molecule_indices = tf.range(len(num_atoms))
-    molecule_indicator = tf.repeat(molecule_indices, num_atoms)
-
-    # Merge (sub)graphs into a global (disconnected) graph. Adding 'increment' to
-    # 'pair_indices' (and merging ragged tensors) actualizes the global graph
-    gather_indices = tf.repeat(molecule_indices[:-1], num_bonds[1:])
-    increment = tf.cumsum(num_atoms[:-1])
-    increment = tf.pad(tf.gather(increment, gather_indices), [(num_bonds[0], 0)])
-    pair_indices = pair_indices.merge_dims(outer_axis=0, inner_axis=1).to_tensor()
-    pair_indices = pair_indices + increment[:, tf.newaxis]
-    atom_features = atom_features.merge_dims(outer_axis=0, inner_axis=1).to_tensor()
-    bond_features = bond_features.merge_dims(outer_axis=0, inner_axis=1).to_tensor()
-
-    return (atom_features, bond_features, pair_indices, molecule_indicator), y_batch
-
-
-def MPNNDataset(X, y, batch_size=32, shuffle=False):
-    dataset = tf.data.Dataset.from_tensor_slices((X, (y)))
-    if shuffle:
-        dataset = dataset.shuffle(1024)
-    return dataset.batch(batch_size).map(prepare_batch, -1).prefetch(-1)
-
-```
 
 ---
 ## Model
@@ -519,7 +683,7 @@ classification.
 
 ### Message passing
 
-The message passing step itself consists of two parts:
+The Message Passing Neural Network (MPNN) architecture implemented in this tutorial consists of three stages: message passing, readout, and classification. The message passing step is the core of the model, enabling information to flow through the molecular graph. It consists of two main components:
 
 1. The *edge network*, which passes messages from 1-hop neighbors `w_{i}` of `v`
 to `v`, based on the edge features between them (`e_{vw_{i}}`),
@@ -540,74 +704,47 @@ the radius (or number of hops) of aggregated information from `v` increases by 1
 
 class EdgeNetwork(layers.Layer):
     def build(self, input_shape):
-        self.atom_dim = input_shape[0][-1]
-        self.bond_dim = input_shape[1][-1]
+        self.atom_dim, self.bond_dim = input_shape[0][-1], input_shape[1][-1]
         self.kernel = self.add_weight(
-            shape=(self.bond_dim, self.atom_dim * self.atom_dim),
-            initializer="glorot_uniform",
-            name="kernel",
+            shape=(self.bond_dim, self.atom_dim**2), initializer="glorot_uniform"
         )
-        self.bias = self.add_weight(
-            shape=(self.atom_dim * self.atom_dim), initializer="zeros", name="bias",
-        )
-        self.built = True
+        self.bias = self.add_weight(shape=(self.atom_dim**2,), initializer="zeros")
 
     def call(self, inputs):
-        atom_features, bond_features, pair_indices = inputs
-
-        # Apply linear transformation to bond features
-        bond_features = tf.matmul(bond_features, self.kernel) + self.bias
-
-        # Reshape for neighborhood aggregation later
-        bond_features = tf.reshape(bond_features, (-1, self.atom_dim, self.atom_dim))
-
-        # Obtain atom features of neighbors
-        atom_features_neighbors = tf.gather(atom_features, pair_indices[:, 1])
-        atom_features_neighbors = tf.expand_dims(atom_features_neighbors, axis=-1)
-
-        # Apply neighborhood aggregation
-        transformed_features = tf.matmul(bond_features, atom_features_neighbors)
-        transformed_features = tf.squeeze(transformed_features, axis=-1)
-        aggregated_features = tf.math.unsorted_segment_sum(
-            transformed_features,
-            pair_indices[:, 0],
-            num_segments=tf.shape(atom_features)[0],
+        atom_feat, bond_feat, pair_idx = inputs
+        bond_transformed = ops.matmul(bond_feat, self.kernel) + self.bias
+        bond_transformed = ops.reshape(
+            bond_transformed, (-1, self.atom_dim, self.atom_dim)
         )
-        return aggregated_features
+        neighbor_feat = ops.take(atom_feat, ops.cast(pair_idx[:, 1], "int32"), axis=0)
+        messages = ops.squeeze(
+            ops.matmul(bond_transformed, ops.expand_dims(neighbor_feat, -1)), -1
+        )
+        return ops.segment_sum(
+            messages,
+            ops.cast(pair_idx[:, 0], "int32"),
+            num_segments=BATCH_SIZE * MAX_ATOMS,
+        )
 
 
 class MessagePassing(layers.Layer):
     def __init__(self, units, steps=4, **kwargs):
         super().__init__(**kwargs)
-        self.units = units
-        self.steps = steps
-
-    def build(self, input_shape):
-        self.atom_dim = input_shape[0][-1]
-        self.message_step = EdgeNetwork()
-        self.pad_length = max(0, self.units - self.atom_dim)
-        self.update_step = layers.GRUCell(self.atom_dim + self.pad_length)
-        self.built = True
+        self.units, self.steps = units, steps
+        self.edge_net = EdgeNetwork()
+        self.gru = layers.GRUCell(units)
+        self.norm = layers.LayerNormalization()
 
     def call(self, inputs):
-        atom_features, bond_features, pair_indices = inputs
-
-        # Pad atom features if number of desired units exceeds atom_features dim.
-        # Alternatively, a dense layer could be used here.
-        atom_features_updated = tf.pad(atom_features, [(0, 0), (0, self.pad_length)])
-
-        # Perform a number of steps of message passing
-        for i in range(self.steps):
-            # Aggregate information from neighbors
-            atom_features_aggregated = self.message_step(
-                [atom_features_updated, bond_features, pair_indices]
-            )
-
-            # Update node state via a step of GRU
-            atom_features_updated, _ = self.update_step(
-                atom_features_aggregated, atom_features_updated
-            )
-        return atom_features_updated
+        atom_feat, bond_feat, pair_idx = inputs
+        atom_feat = ops.pad(
+            atom_feat, [(0, 0), (0, max(0, self.units - ops.shape(atom_feat)[-1]))]
+        )
+        for _ in range(self.steps):
+            m = self.edge_net([atom_feat, bond_feat, pair_idx])
+            atom_feat, _ = self.gru(m, atom_feat)
+            atom_feat = self.norm(atom_feat)  # Normalize every step
+        return atom_feat
 
 ```
 
@@ -618,73 +755,46 @@ into subgraphs (corresponding to each molecule in the batch) and subsequently
 reduced to graph-level embeddings. In the
 [original paper](https://arxiv.org/abs/1704.01212), a
 [set-to-set layer](https://arxiv.org/abs/1511.06391) was used for this purpose.
-In this tutorial however, a transformer encoder + average pooling will be used. Specifically:
-
-* the k-step-aggregated node states will be partitioned into the subgraphs
-(corresponding to each molecule in the batch);
-* each subgraph will then be padded to match the subgraph with the greatest number of nodes, followed
-by a `tf.stack(...)`;
-* the (stacked padded) tensor, encoding subgraphs (each subgraph containing a set of node states), are
-masked to make sure the paddings don't interfere with training;
-* finally, the tensor is passed to the transformer followed by average pooling.
+In this tutorial, we utilize a Gated Readout combined with Hybrid Pooling (Mean and Max).
+This approach is highly stable and fully compatible with JAX, PyTorch, and TensorFlow. The process works as follows:
+Gating Mechanism: Each node state passes through a learned gating function (using sigmoid and tanh activations). This allows the model to "decide" which atoms are most important for the molecular property being predicted.
+Masking: We use the mask generated in our data pipeline to ensure that padded (zero) atoms do not contribute to the final graph embedding.
+Hybrid Segment Pooling: Instead of physically partitioning the tensors, we use the molecule_indicator (batch index) to logically group atoms. We calculate both the Mean and the Max of the node states for each molecule.
+Concatenation: The mean and max features are concatenated to form a robust, fixed-size graph-level representation.
 
 
 ```python
 
-class PartitionPadding(layers.Layer):
-    def __init__(self, batch_size, **kwargs):
+class GatedReadout(layers.Layer):
+    """A more stable readout using both Mean and Max pooling."""
+
+    def __init__(self, embed_dim, **kwargs):
         super().__init__(**kwargs)
-        self.batch_size = batch_size
+        self.gate = layers.Dense(embed_dim, activation="sigmoid")
+        self.feat = layers.Dense(embed_dim, activation="tanh")
 
     def call(self, inputs):
+        nodes, indicator, mask = inputs
+        mask = ops.expand_dims(mask, -1)
 
-        atom_features, molecule_indicator = inputs
+        # Gated logic: atoms "decide" how much they contribute
+        gated_x = self.gate(nodes) * self.feat(nodes)
+        gated_x = gated_x * mask
 
-        # Obtain subgraphs
-        atom_features_partitioned = tf.dynamic_partition(
-            atom_features, molecule_indicator, self.batch_size
+        # Combined Mean and Max pooling for robustness
+        x_mean = ops.segment_sum(
+            gated_x, ops.cast(indicator, "int32"), num_segments=BATCH_SIZE
+        ) / ops.maximum(
+            ops.segment_sum(
+                mask, ops.cast(indicator, "int32"), num_segments=BATCH_SIZE
+            ),
+            1e-6,
+        )
+        x_max = ops.segment_max(
+            gated_x, ops.cast(indicator, "int32"), num_segments=BATCH_SIZE
         )
 
-        # Pad and stack subgraphs
-        num_atoms = [tf.shape(f)[0] for f in atom_features_partitioned]
-        max_num_atoms = tf.reduce_max(num_atoms)
-        atom_features_stacked = tf.stack(
-            [
-                tf.pad(f, [(0, max_num_atoms - n), (0, 0)])
-                for f, n in zip(atom_features_partitioned, num_atoms)
-            ],
-            axis=0,
-        )
-
-        # Remove empty subgraphs (usually for last batch in dataset)
-        gather_indices = tf.where(tf.reduce_sum(atom_features_stacked, (1, 2)) != 0)
-        gather_indices = tf.squeeze(gather_indices, axis=-1)
-        return tf.gather(atom_features_stacked, gather_indices, axis=0)
-
-
-class TransformerEncoderReadout(layers.Layer):
-    def __init__(
-        self, num_heads=8, embed_dim=64, dense_dim=512, batch_size=32, **kwargs
-    ):
-        super().__init__(**kwargs)
-
-        self.partition_padding = PartitionPadding(batch_size)
-        self.attention = layers.MultiHeadAttention(num_heads, embed_dim)
-        self.dense_proj = keras.Sequential(
-            [layers.Dense(dense_dim, activation="relu"), layers.Dense(embed_dim),]
-        )
-        self.layernorm_1 = layers.LayerNormalization()
-        self.layernorm_2 = layers.LayerNormalization()
-        self.average_pooling = layers.GlobalAveragePooling1D()
-
-    def call(self, inputs):
-        x = self.partition_padding(inputs)
-        padding_mask = tf.reduce_any(tf.not_equal(x, 0.0), axis=-1)
-        padding_mask = padding_mask[:, tf.newaxis, tf.newaxis, :]
-        attention_output = self.attention(x, x, attention_mask=padding_mask)
-        proj_input = self.layernorm_1(x + attention_output)
-        proj_output = self.layernorm_2(proj_input + self.dense_proj(proj_input))
-        return self.average_pooling(proj_output)
+        return ops.concatenate([x_mean, x_max], axis=-1)
 
 ```
 
@@ -697,174 +807,236 @@ predictions of BBBP.
 
 ```python
 
-def MPNNModel(
-    atom_dim,
-    bond_dim,
-    batch_size=32,
-    message_units=64,
-    message_steps=4,
-    num_attention_heads=8,
-    dense_units=512,
-):
+def MPNNModel(atom_dim, bond_dim):
+    a_in = layers.Input(shape=(atom_dim,), name="atom_features")
+    b_in = layers.Input(shape=(bond_dim,), name="bond_features")
+    p_in = layers.Input(shape=(2,), dtype="int32", name="pair_indices")
+    i_in = layers.Input(shape=(), dtype="int32", name="molecule_indicator")
+    m_in = layers.Input(shape=(), name="mask")
 
-    atom_features = layers.Input((atom_dim), dtype="float32", name="atom_features")
-    bond_features = layers.Input((bond_dim), dtype="float32", name="bond_features")
-    pair_indices = layers.Input((2), dtype="int32", name="pair_indices")
-    molecule_indicator = layers.Input((), dtype="int32", name="molecule_indicator")
+    x = MessagePassing(64, steps=4)([a_in, b_in, p_in])
+    x = GatedReadout(64)([x, i_in, m_in])
 
-    x = MessagePassing(message_units, message_steps)(
-        [atom_features, bond_features, pair_indices]
+    x = layers.Dense(256, activation="relu", kernel_regularizer=regularizers.l2(1e-3))(
+        x
+    )
+    x = layers.Dropout(0.5)(x)  # High dropout for smoothness
+    return keras.Model(
+        inputs=[a_in, b_in, p_in, i_in, m_in],
+        outputs=layers.Dense(1, activation="sigmoid")(x),
     )
 
-    x = TransformerEncoderReadout(
-        num_attention_heads, message_units, dense_units, batch_size
-    )([x, molecule_indicator])
 
-    x = layers.Dense(dense_units, activation="relu")(x)
-    x = layers.Dense(1, activation="sigmoid")(x)
-
-    model = keras.Model(
-        inputs=[atom_features, bond_features, pair_indices, molecule_indicator],
-        outputs=[x],
-    )
-    return model
-
-
-mpnn = MPNNModel(
-    atom_dim=x_train[0][0][0].shape[0], bond_dim=x_train[1][0][0].shape[0],
+# Learning Rate: Slower warmup, lower peak
+lr_schedule = keras.optimizers.schedules.CosineDecay(
+    initial_learning_rate=0.0,
+    decay_steps=BATCH_SIZE * EPOCHS,
+    warmup_target=LEARNING_RATE,
+    warmup_steps=BATCH_SIZE * 5,
 )
 
+mpnn = MPNNModel(atom_featurizer.dim, bond_featurizer.dim)
 mpnn.compile(
-    loss=keras.losses.BinaryCrossentropy(),
-    optimizer=keras.optimizers.Adam(learning_rate=5e-4),
+    loss="binary_crossentropy",
+    optimizer=keras.optimizers.AdamW(
+        learning_rate=lr_schedule, weight_decay=1e-3, global_clipnorm=0.5
+    ),
     metrics=[keras.metrics.AUC(name="AUC")],
 )
-
-keras.utils.plot_model(mpnn, show_dtype=True, show_shapes=True)
+# keras.utils.plot_model(mpnn, show_dtype=True, show_shapes=True)
 ```
-
-
-
-
-    
-![png](/img/examples/graph/mpnn-molecular-graphs/mpnn-molecular-graphs_21_0.png)
-    
-
-
 
 ### Training
 
 
 ```python
-train_dataset = MPNNDataset(x_train, y_train)
-valid_dataset = MPNNDataset(x_valid, y_valid)
-test_dataset = MPNNDataset(x_test, y_test)
-
 history = mpnn.fit(
     train_dataset,
     validation_data=valid_dataset,
-    epochs=40,
-    verbose=2,
+    epochs=EPOCHS,
+    verbose=1,
     class_weight={0: 2.0, 1: 0.5},
 )
 
-plt.figure(figsize=(10, 6))
-plt.plot(history.history["AUC"], label="train AUC")
-plt.plot(history.history["val_AUC"], label="valid AUC")
-plt.xlabel("Epochs", fontsize=16)
-plt.ylabel("AUC", fontsize=16)
-plt.legend(fontsize=16)
+# Final Plot
+plt.figure(figsize=(10, 5))
+plt.plot(history.history["AUC"], label="train AUC", linewidth=2)
+plt.plot(history.history["val_AUC"], label="valid AUC", linewidth=2)
+plt.grid(True, alpha=0.3)
+plt.title("Optimized Stable MPNN Training")
+plt.xlabel("Epochs")
+plt.ylabel("AUC")
+plt.legend()
+
 ```
 
 <div class="k-default-codeblock">
 ```
 Epoch 1/40
-52/52 - 26s - loss: 0.5572 - AUC: 0.6527 - val_loss: 0.4660 - val_AUC: 0.8312 - 26s/epoch - 501ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 14s 419ms/step - AUC: 0.5641 - loss: 0.7656 - val_AUC: 0.4880 - val_loss: 0.9153
+
 Epoch 2/40
-52/52 - 22s - loss: 0.4817 - AUC: 0.7713 - val_loss: 0.6889 - val_AUC: 0.8351 - 22s/epoch - 416ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 10s 395ms/step - AUC: 0.6871 - loss: 0.7284 - val_AUC: 0.7429 - val_loss: 0.8283
+
 Epoch 3/40
-52/52 - 24s - loss: 0.4611 - AUC: 0.7960 - val_loss: 0.5863 - val_AUC: 0.8444 - 24s/epoch - 457ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 10s 401ms/step - AUC: 0.8076 - loss: 0.6689 - val_AUC: 0.8287 - val_loss: 0.7392
+
 Epoch 4/40
-52/52 - 19s - loss: 0.4493 - AUC: 0.8069 - val_loss: 0.5059 - val_AUC: 0.8509 - 19s/epoch - 372ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 421ms/step - AUC: 0.8719 - loss: 0.5904 - val_AUC: 0.9333 - val_loss: 0.6054
+
 Epoch 5/40
-52/52 - 21s - loss: 0.4420 - AUC: 0.8155 - val_loss: 0.4965 - val_AUC: 0.8454 - 21s/epoch - 405ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 10s 402ms/step - AUC: 0.8926 - loss: 0.5386 - val_AUC: 0.8830 - val_loss: 0.6064
+
 Epoch 6/40
-52/52 - 22s - loss: 0.4344 - AUC: 0.8243 - val_loss: 0.5307 - val_AUC: 0.8540 - 22s/epoch - 419ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 9s 366ms/step - AUC: 0.9056 - loss: 0.5033 - val_AUC: 0.9173 - val_loss: 0.5284
+
 Epoch 7/40
-52/52 - 26s - loss: 0.4301 - AUC: 0.8293 - val_loss: 0.5131 - val_AUC: 0.8559 - 26s/epoch - 503ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 8s 315ms/step - AUC: 0.9163 - loss: 0.4654 - val_AUC: 0.8994 - val_loss: 0.5299
+
 Epoch 8/40
-52/52 - 31s - loss: 0.4163 - AUC: 0.8408 - val_loss: 0.5361 - val_AUC: 0.8552 - 31s/epoch - 599ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 419ms/step - AUC: 0.9198 - loss: 0.4475 - val_AUC: 0.9263 - val_loss: 0.4681
+
 Epoch 9/40
-52/52 - 30s - loss: 0.4095 - AUC: 0.8499 - val_loss: 0.5371 - val_AUC: 0.8572 - 30s/epoch - 578ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 10s 372ms/step - AUC: 0.9267 - loss: 0.4245 - val_AUC: 0.9186 - val_loss: 0.4927
+
 Epoch 10/40
-52/52 - 23s - loss: 0.4107 - AUC: 0.8459 - val_loss: 0.5923 - val_AUC: 0.8589 - 23s/epoch - 444ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 275ms/step - AUC: 0.9296 - loss: 0.4152 - val_AUC: 0.9443 - val_loss: 0.4165
+
 Epoch 11/40
-52/52 - 29s - loss: 0.4107 - AUC: 0.8505 - val_loss: 0.5070 - val_AUC: 0.8627 - 29s/epoch - 553ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 415ms/step - AUC: 0.9361 - loss: 0.3933 - val_AUC: 0.9201 - val_loss: 0.4750
+
 Epoch 12/40
-52/52 - 25s - loss: 0.4005 - AUC: 0.8522 - val_loss: 0.5417 - val_AUC: 0.8781 - 25s/epoch - 471ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 12s 452ms/step - AUC: 0.9311 - loss: 0.3967 - val_AUC: 0.9368 - val_loss: 0.4119
+
 Epoch 13/40
-52/52 - 22s - loss: 0.3924 - AUC: 0.8623 - val_loss: 0.5915 - val_AUC: 0.8755 - 22s/epoch - 425ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 12s 448ms/step - AUC: 0.9127 - loss: 0.4392 - val_AUC: 0.9419 - val_loss: 0.3968
+
 Epoch 14/40
-52/52 - 19s - loss: 0.3872 - AUC: 0.8640 - val_loss: 0.5852 - val_AUC: 0.8724 - 19s/epoch - 365ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 418ms/step - AUC: 0.9151 - loss: 0.4155 - val_AUC: 0.9111 - val_loss: 0.4468
+
 Epoch 15/40
-52/52 - 19s - loss: 0.3812 - AUC: 0.8720 - val_loss: 0.4949 - val_AUC: 0.8759 - 19s/epoch - 362ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 10s 400ms/step - AUC: 0.9341 - loss: 0.3654 - val_AUC: 0.9274 - val_loss: 0.4094
+
 Epoch 16/40
-52/52 - 27s - loss: 0.3604 - AUC: 0.8864 - val_loss: 0.5076 - val_AUC: 0.8773 - 27s/epoch - 521ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 409ms/step - AUC: 0.9417 - loss: 0.3484 - val_AUC: 0.9383 - val_loss: 0.3747
+
 Epoch 17/40
-52/52 - 37s - loss: 0.3554 - AUC: 0.8907 - val_loss: 0.4556 - val_AUC: 0.8771 - 37s/epoch - 712ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 414ms/step - AUC: 0.9463 - loss: 0.3399 - val_AUC: 0.9195 - val_loss: 0.4401
+
 Epoch 18/40
-52/52 - 23s - loss: 0.3554 - AUC: 0.8904 - val_loss: 0.4854 - val_AUC: 0.8887 - 23s/epoch - 452ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 412ms/step - AUC: 0.9507 - loss: 0.3162 - val_AUC: 0.8753 - val_loss: 0.5406
+
 Epoch 19/40
-52/52 - 26s - loss: 0.3504 - AUC: 0.8942 - val_loss: 0.4622 - val_AUC: 0.8881 - 26s/epoch - 507ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 427ms/step - AUC: 0.9453 - loss: 0.3283 - val_AUC: 0.9455 - val_loss: 0.3459
+
 Epoch 20/40
-52/52 - 20s - loss: 0.3378 - AUC: 0.9019 - val_loss: 0.5568 - val_AUC: 0.8792 - 20s/epoch - 390ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 434ms/step - AUC: 0.9525 - loss: 0.3079 - val_AUC: 0.9239 - val_loss: 0.4015
+
 Epoch 21/40
-52/52 - 19s - loss: 0.3324 - AUC: 0.9055 - val_loss: 0.5623 - val_AUC: 0.8789 - 19s/epoch - 363ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 409ms/step - AUC: 0.9593 - loss: 0.2843 - val_AUC: 0.9296 - val_loss: 0.3761
+
 Epoch 22/40
-52/52 - 19s - loss: 0.3248 - AUC: 0.9109 - val_loss: 0.5486 - val_AUC: 0.8909 - 19s/epoch - 357ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 416ms/step - AUC: 0.9607 - loss: 0.2795 - val_AUC: 0.9674 - val_loss: 0.2956
+
 Epoch 23/40
-52/52 - 18s - loss: 0.3126 - AUC: 0.9179 - val_loss: 0.5684 - val_AUC: 0.8916 - 18s/epoch - 348ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 420ms/step - AUC: 0.9605 - loss: 0.2784 - val_AUC: 0.9175 - val_loss: 0.4183
+
 Epoch 24/40
-52/52 - 18s - loss: 0.3296 - AUC: 0.9084 - val_loss: 0.5462 - val_AUC: 0.8858 - 18s/epoch - 352ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 423ms/step - AUC: 0.9624 - loss: 0.2725 - val_AUC: 0.9511 - val_loss: 0.3246
+
 Epoch 25/40
-52/52 - 18s - loss: 0.3098 - AUC: 0.9193 - val_loss: 0.4212 - val_AUC: 0.9085 - 18s/epoch - 349ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 432ms/step - AUC: 0.9679 - loss: 0.2516 - val_AUC: 0.9609 - val_loss: 0.3052
+
 Epoch 26/40
-52/52 - 18s - loss: 0.3095 - AUC: 0.9192 - val_loss: 0.4991 - val_AUC: 0.9002 - 18s/epoch - 348ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 11s 442ms/step - AUC: 0.9726 - loss: 0.2392 - val_AUC: 0.9547 - val_loss: 0.3139
+
 Epoch 27/40
-52/52 - 18s - loss: 0.3056 - AUC: 0.9211 - val_loss: 0.4739 - val_AUC: 0.9060 - 18s/epoch - 349ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 266ms/step - AUC: 0.9705 - loss: 0.2384 - val_AUC: 0.9446 - val_loss: 0.3331
+
 Epoch 28/40
-52/52 - 18s - loss: 0.2942 - AUC: 0.9270 - val_loss: 0.4188 - val_AUC: 0.9121 - 18s/epoch - 344ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 256ms/step - AUC: 0.9734 - loss: 0.2262 - val_AUC: 0.9561 - val_loss: 0.2988
+
 Epoch 29/40
-52/52 - 18s - loss: 0.3004 - AUC: 0.9241 - val_loss: 0.4056 - val_AUC: 0.9146 - 18s/epoch - 351ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 263ms/step - AUC: 0.9820 - loss: 0.1992 - val_AUC: 0.9451 - val_loss: 0.3309
+
 Epoch 30/40
-52/52 - 18s - loss: 0.2810 - AUC: 0.9328 - val_loss: 0.3923 - val_AUC: 0.9172 - 18s/epoch - 355ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 270ms/step - AUC: 0.9802 - loss: 0.1964 - val_AUC: 0.9634 - val_loss: 0.2908
+
 Epoch 31/40
-52/52 - 18s - loss: 0.2661 - AUC: 0.9398 - val_loss: 0.3609 - val_AUC: 0.9186 - 18s/epoch - 349ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 261ms/step - AUC: 0.9812 - loss: 0.1918 - val_AUC: 0.9439 - val_loss: 0.3579
+
 Epoch 32/40
-52/52 - 19s - loss: 0.2797 - AUC: 0.9336 - val_loss: 0.3764 - val_AUC: 0.9055 - 19s/epoch - 357ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 260ms/step - AUC: 0.9813 - loss: 0.1948 - val_AUC: 0.9590 - val_loss: 0.2953
+
 Epoch 33/40
-52/52 - 19s - loss: 0.2552 - AUC: 0.9441 - val_loss: 0.3941 - val_AUC: 0.9187 - 19s/epoch - 368ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 260ms/step - AUC: 0.9856 - loss: 0.1737 - val_AUC: 0.9599 - val_loss: 0.2968
+
 Epoch 34/40
-52/52 - 23s - loss: 0.2601 - AUC: 0.9435 - val_loss: 0.4128 - val_AUC: 0.9154 - 23s/epoch - 443ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 264ms/step - AUC: 0.9867 - loss: 0.1637 - val_AUC: 0.9576 - val_loss: 0.2894
+
 Epoch 35/40
-52/52 - 32s - loss: 0.2533 - AUC: 0.9455 - val_loss: 0.4191 - val_AUC: 0.9109 - 32s/epoch - 615ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 264ms/step - AUC: 0.9888 - loss: 0.1587 - val_AUC: 0.9631 - val_loss: 0.2650
+
 Epoch 36/40
-52/52 - 23s - loss: 0.2530 - AUC: 0.9459 - val_loss: 0.4276 - val_AUC: 0.9213 - 23s/epoch - 435ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 265ms/step - AUC: 0.9863 - loss: 0.1641 - val_AUC: 0.9563 - val_loss: 0.2904
+
 Epoch 37/40
-52/52 - 31s - loss: 0.2531 - AUC: 0.9456 - val_loss: 0.3950 - val_AUC: 0.9292 - 31s/epoch - 593ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 261ms/step - AUC: 0.9899 - loss: 0.1467 - val_AUC: 0.9584 - val_loss: 0.2911
+
 Epoch 38/40
-52/52 - 22s - loss: 0.3039 - AUC: 0.9229 - val_loss: 0.3114 - val_AUC: 0.9315 - 22s/epoch - 428ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 265ms/step - AUC: 0.9904 - loss: 0.1431 - val_AUC: 0.9537 - val_loss: 0.3060
+
 Epoch 39/40
-52/52 - 20s - loss: 0.2477 - AUC: 0.9479 - val_loss: 0.3584 - val_AUC: 0.9292 - 20s/epoch - 391ms/step
+
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 264ms/step - AUC: 0.9905 - loss: 0.1420 - val_AUC: 0.9585 - val_loss: 0.2752
+
 Epoch 40/40
-52/52 - 22s - loss: 0.2276 - AUC: 0.9565 - val_loss: 0.3279 - val_AUC: 0.9258 - 22s/epoch - 416ms/step
 
-<matplotlib.legend.Legend at 0x1603c63d0>
+26/26 ━━━━━━━━━━━━━━━━━━━━ 7s 269ms/step - AUC: 0.9923 - loss: 0.1260 - val_AUC: 0.9634 - val_loss: 0.2735
 
+<matplotlib.legend.Legend at 0x316be7620>
 ```
 </div>
-    
-![png](/img/examples/graph/mpnn-molecular-graphs/mpnn-molecular-graphs_23_2.png)
+
+![png](/img/examples/graph/mpnn-molecular-graphs/mpnn-molecular-graphs_23_1121.png)
     
 
 
@@ -872,19 +1044,25 @@ Epoch 40/40
 
 
 ```python
-molecules = [molecule_from_smiles(df.smiles.values[index]) for index in test_index]
-y_true = [df.p_np.values[index] for index in test_index]
-y_pred = tf.squeeze(mpnn.predict(test_dataset), axis=1)
+molecules = [Chem.MolFromSmiles(df.smiles.values[index]) for index in test_idx]
+y_true = [df.p_np.values[index] for index in test_idx]
+
+predictions = mpnn.predict(test_dataset)
+y_pred = ops.convert_to_numpy(predictions)[: len(test_idx), 0]
 
 legends = [f"y_true/y_pred = {y_true[i]}/{y_pred[i]:.2f}" for i in range(len(y_true))]
+
 MolsToGridImage(molecules, molsPerRow=4, legends=legends)
 ```
 
-
-
-
     
-![png](/img/examples/graph/mpnn-molecular-graphs/mpnn-molecular-graphs_25_0.png)
+<div class="k-default-codeblock">
+```
+1/1 ━━━━━━━━━━━━━━━━━━━━ 0s 255ms/step
+```
+</div>
+
+![png](/img/examples/graph/mpnn-molecular-graphs/mpnn-molecular-graphs_25_2.png)
     
 
 

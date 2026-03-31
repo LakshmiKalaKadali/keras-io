@@ -345,6 +345,7 @@ molecule = molecule_from_smiles(df.smiles.values[sample_idx])
 print("Molecule object created successfully.")
 molecule
 """
+
 """
 
 # Convert to graph and check constant shapes
@@ -356,8 +357,8 @@ print(f"\tpair indices \t {p.shape}")
 """
 ### Data Loading with PyDataset
 
-In this tutorial, the MPNN implementation takes a single graph as input per iteration. 
-To process a batch of molecules, we merge them into a single global graph (also known as a disjoint graph). 
+In this tutorial, the MPNN implementation takes a single graph as input per iteration.
+To process a batch of molecules, we merge them into a single global graph (also known as a disjoint graph).
 This global graph is a disconnected structure where each molecule (subgraph) is separated from the others.
 """
 
@@ -611,8 +612,7 @@ mpnn.compile(
     ),
     metrics=[keras.metrics.AUC(name="AUC")],
 )
-
-keras.utils.plot_model(mpnn, show_dtype=True, show_shapes=True)
+# keras.utils.plot_model(mpnn, show_dtype=True, show_shapes=True)
 
 """
 ### Training
