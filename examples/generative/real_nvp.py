@@ -36,7 +36,9 @@ import os
 os.environ["KERAS_BACKEND"] = "jax"
 
 import keras
-from keras import layers, ops, regularizers
+from keras import layers
+from keras import ops
+from keras import regularizers
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_moons
@@ -45,6 +47,8 @@ from sklearn.datasets import make_moons
 ## Load the data
 """
 
+# make_moons(3000, noise=0.05): 3000 samples with Gaussian noise level 0.05;
+# [0] selects feature coordinates (X) and drops labels (y).
 data = make_moons(3000, noise=0.05)[0].astype("float32")
 norm = layers.Normalization()
 norm.adapt(data)
@@ -54,30 +58,53 @@ normalized_data = norm(data)
 ## Affine coupling layer
 """
 
-# Creating a custom layer with keras API.
-output_dim = 256
-reg = 0.01
+COUPLING_HIDDEN_UNITS = 256
+COUPLING_MLP_LAYERS = 4
+COUPLING_L2_WEIGHT = 0.01
 
 
 def Coupling(input_shape):
     input_layer = layers.Input(shape=(input_shape,))
 
     def mlp(x):
-        for _ in range(4):
+        for _ in range(COUPLING_MLP_LAYERS):
             x = layers.Dense(
-                256, activation="relu", kernel_regularizer=regularizers.l2(0.01)
+                COUPLING_HIDDEN_UNITS,
+                activation="relu",
+                kernel_regularizer=regularizers.l2(COUPLING_L2_WEIGHT),
             )(x)
         return x
 
-    # Scale (s) and Translation (t)
+    # Scale and translation parameters
     shared = mlp(input_layer)
-    s = layers.Dense(input_shape, activation="tanh")(shared)
-    t = layers.Dense(input_shape, activation="linear")(shared)
-    return keras.Model(inputs=input_layer, outputs=[s, t])
+    scale = layers.Dense(
+        input_shape,
+        activation="tanh",
+        kernel_regularizer=regularizers.l2(COUPLING_L2_WEIGHT),
+    )(shared)
+    translation = layers.Dense(
+        input_shape,
+        activation="linear",
+        kernel_regularizer=regularizers.l2(COUPLING_L2_WEIGHT),
+    )(shared)
+    return keras.Model(inputs=input_layer, outputs=[scale, translation])
 
 
 """
 ## Real NVP
+
+Real NVP stacks invertible affine coupling layers to transform data space (x)
+and latent space (z).
+
+In each coupling layer, one subset of features is kept fixed by a mask, while
+the other subset is scaled and shifted:
+z_part = x_part * exp(scale) + translation
+
+Because each layer is invertible and has a tractable Jacobian determinant,
+we can compute exact log-likelihood using the change-of-variables formula.
+In this implementation:
+- training=True maps data -> latent (x -> z)
+- training=False maps latent -> data (z -> x)
 """
 
 
@@ -105,16 +132,19 @@ class RealNVP(keras.Model):
         for i in layer_indices:
             x_masked = x * self.masks[i]
             reversed_mask = 1.0 - self.masks[i]
-            s, t = self.coupling_layers[i](x_masked)
-            s *= reversed_mask
-            t *= reversed_mask
+            scale, translation = self.coupling_layers[i](x_masked)
+            scale *= reversed_mask
+            translation *= reversed_mask
             gate = (direction - 1.0) / 2.0
             x = (
                 reversed_mask
-                * (x * ops.exp(direction * s) + direction * t * ops.exp(gate * s))
+                * (
+                    x * ops.exp(direction * scale)
+                    + direction * translation * ops.exp(gate * scale)
+                )
                 + x_masked
             )
-            log_det_inv += gate * ops.sum(s, axis=1)
+            log_det_inv += gate * ops.sum(scale, axis=1)
         return x, log_det_inv
 
     def compute_loss(self, x=None, y=None, y_pred=None, sample_weight=None):
@@ -140,9 +170,8 @@ class RealNVP(keras.Model):
 model = RealNVP(num_coupling_layers=6)
 model.compile(optimizer=keras.optimizers.Adam(learning_rate=0.0001))
 
-indices = np.arange(len(normalized_data))
-np.random.shuffle(indices)
-normalized_data = normalized_data[indices]
+shuffle_indices = np.random.permutation(len(normalized_data))
+normalized_data = normalized_data[shuffle_indices]
 
 # Now fit
 history = model.fit(
