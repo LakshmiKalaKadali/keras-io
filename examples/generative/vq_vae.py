@@ -29,7 +29,7 @@ VQ-VAEs are one of the main recipes behind [DALL-E](https://openai.com/blog/dall
 and the idea of a codebook is used in [VQ-GANs](https://arxiv.org/abs/2012.09841).
 This example uses implementation details from the
 [official VQ-VAE tutorial](https://github.com/deepmind/sonnet/blob/master/sonnet/examples/vqvae_example.ipynb)
-from DeepMind. 
+from DeepMind.
 
 ## Requirements
 
@@ -137,9 +137,9 @@ class VectorQuantizer(layers.Layer):
 
 This line of code implements the straight-through estimator: quantized = x + ops.stop_gradient(quantized - x).
 In the forward pass, the terms cancel out (x+quantized−x), and the layer outputs the discrete quantized vectors.
-In the backward pass, since the gradient of ops.stop_gradient is zero, 
-the gradient of the loss with respect to the output is effectively copied directly 
-to the input x (the encoder's output).This allows the model to bypass the non-differentiable quantization step 
+In the backward pass, since the gradient of ops.stop_gradient is zero,
+the gradient of the loss with respect to the output is effectively copied directly
+to the input x (the encoder's output).This allows the model to bypass the non-differentiable quantization step
 and train the encoder using the decoder's gradients.. Thanks to [this video](https://youtu.be/VZFVUrYcig0?t=1393)
 for helping me understand this technique.
 """
@@ -149,8 +149,7 @@ for helping me understand this technique.
 
 Now for the encoder and the decoder for the VQ-VAE. We will keep them small so
 that their capacity is a good fit for the MNIST dataset. The implementation of the encoder and
-decoder come from
-[this example](https://keras.io/examples/generative/vae).
+decoder come from [this example](https://keras.io/examples/generative/vae).
 
 Note that activations _other than ReLU_ may not work for the encoder and decoder layers in the
 quantization architecture: Leaky ReLU activated layers, for example, have proven difficult to
@@ -310,8 +309,8 @@ for test_image, reconstructed_image in zip(test_images, reconstructions_output):
 
 """
 These results look decent. You are encouraged to play with different hyperparameters
-(especially the number of embeddings and the dimensions of the embeddings) and observe how
-they affect the results.
+(especially the number of embeddings and the dimensions of the embeddings) and
+observe how they affect the results.
 """
 
 """
@@ -340,7 +339,7 @@ The figure above shows that the discrete codes have been able to capture some
 regularities from the dataset. Now, how do we sample from this codebook to create
 novel images? Since these codes are discrete and we imposed a categorical distribution
 on them, we cannot use them yet to generate anything meaningful until we can generate likely
-sequences of codes that we can give to the decoder. 
+sequences of codes that we can give to the decoder.
 
 The authors use a PixelCNN to train these codes so that they can be used as powerful priors to
 generate novel examples. PixelCNN was proposed in
@@ -376,12 +375,12 @@ arrangements of codebook indices.
 
 Note that this shape is something to optimize for in larger-sized image domains, along with the code
 book sizes. Since the PixelCNN is autoregressive, it needs to pass over each codebook index sequentially
-in order to generate novel images from the codebook. Each stride-2 (or rather more correctly a 
+in order to generate novel images from the codebook. Each stride-2 (or rather more correctly a
 stride (2, 2)) convolution layer will divide the image generation time by four. Note, however, that there
 is probably a lower bound on this part: when the number of codes for the image to reconstruct is too small,
 it has insufficient information for the decoder to represent the level of detail in the image, so the
-output quality will suffer. This can be amended at least to some extent by using a larger code book. 
-Since the autoregressive part of the image generation procedure uses codebook indices, there is far less of 
+output quality will suffer. This can be amended at least to some extent by using a larger code book.
+Since the autoregressive part of the image generation procedure uses codebook indices, there is far less of
 a performance penalty on using a larger code book as the lookup time for a larger-sized code from a larger
 code book is much smaller in comparison to iterating over a larger sequence of code book indices, although
 the size of the code book does impact on the batch size that can pass through the image generation procedure.
