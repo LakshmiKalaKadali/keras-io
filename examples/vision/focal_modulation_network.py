@@ -769,34 +769,8 @@ def display_grid(test_images, gates, modulator):
 
 
 """
-### TrainMonitor
-"""
-
-# Fetch test batch for callback
-test_batch_images, _ = test_ds[0]
-
-
-class TrainMonitor(keras.callbacks.Callback):
-    def __init__(self, epoch_interval=10):
-        super().__init__()
-        self.epoch_interval = epoch_interval
-        self.upsampler = layers.UpSampling2D(size=(4, 4), interpolation="bilinear")
-
-    def on_epoch_end(self, epoch, logs=None):
-        if (epoch + 1) % self.epoch_interval == 0:
-            _ = self.model(test_batch_images, training=False)
-            layer = self.model.basic_layers[1].blocks[-1].modulation
-            display_grid(
-                test_batch_images,
-                self.upsampler(layer.gates),
-                self.upsampler(layer.modulator),
-            )
-
-
-"""
 ### Learning Rate scheduler
 """
-
 
 class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, lr_base, total_steps, warmup_steps):
@@ -849,7 +823,6 @@ history = model.fit(
     train_ds,
     validation_data=val_ds,
     epochs=EPOCHS,
-    callbacks=[],
 )
 
 """
