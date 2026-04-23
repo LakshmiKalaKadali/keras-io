@@ -772,6 +772,7 @@ def display_grid(test_images, gates, modulator):
 ### Learning Rate scheduler
 """
 
+
 class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, lr_base, total_steps, warmup_steps):
         super().__init__()
