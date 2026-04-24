@@ -776,32 +776,6 @@ def display_grid(test_images, gates, modulator):
 
 ```
 
-### TrainMonitor
-
-
-```python
-# Fetch test batch for callback
-test_batch_images, _ = test_ds[0]
-
-
-class TrainMonitor(keras.callbacks.Callback):
-    def __init__(self, epoch_interval=10):
-        super().__init__()
-        self.epoch_interval = epoch_interval
-        self.upsampler = layers.UpSampling2D(size=(4, 4), interpolation="bilinear")
-
-    def on_epoch_end(self, epoch, logs=None):
-        if (epoch + 1) % self.epoch_interval == 0:
-            _ = self.model(test_batch_images, training=False)
-            layer = self.model.basic_layers[1].blocks[-1].modulation
-            display_grid(
-                test_batch_images,
-                self.upsampler(layer.gates),
-                self.upsampler(layer.modulator),
-            )
-
-```
-
 ### Learning Rate scheduler
 
 
@@ -859,7 +833,6 @@ history = model.fit(
     train_ds,
     validation_data=val_ds,
     epochs=EPOCHS,
-    callbacks=[],
 )
 ```
 
@@ -868,87 +841,87 @@ history = model.fit(
 Epoch 1/20
 
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1772431619.408199 4985427 service.cc:152] XLA service 0x166d7d250 initialized for platform Host (this does not guarantee that XLA will be used). Devices:
-I0000 00:00:1772431619.408213 4985427 service.cc:160]   StreamExecutor device (0): Host, Default Version
-I0000 00:00:1772431619.566351 4985427 device_compiler.h:188] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+I0000 00:00:1777027663.829105 8722813 service.cc:152] XLA service 0x35911d0b0 initialized for platform Host (this does not guarantee that XLA will be used). Devices:
+I0000 00:00:1777027663.829121 8722813 service.cc:160]   StreamExecutor device (0): Host, Default Version
+I0000 00:00:1777027663.878984 8722813 device_compiler.h:188] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 310s 958ms/step - accuracy: 0.1826 - loss: 2.1990 - val_accuracy: 0.2426 - val_loss: 2.0434
+313/313 ━━━━━━━━━━━━━━━━━━━━ 309s 954ms/step - accuracy: 0.1826 - loss: 2.1990 - val_accuracy: 0.2426 - val_loss: 2.0434
 
 Epoch 2/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 301s 963ms/step - accuracy: 0.2891 - loss: 1.8906 - val_accuracy: 0.3191 - val_loss: 1.8333
+313/313 ━━━━━━━━━━━━━━━━━━━━ 309s 986ms/step - accuracy: 0.2891 - loss: 1.8906 - val_accuracy: 0.3191 - val_loss: 1.8333
 
 Epoch 3/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 311s 994ms/step - accuracy: 0.3669 - loss: 1.7095 - val_accuracy: 0.3869 - val_loss: 1.6693
+313/313 ━━━━━━━━━━━━━━━━━━━━ 308s 983ms/step - accuracy: 0.3669 - loss: 1.7095 - val_accuracy: 0.3869 - val_loss: 1.6693
 
 Epoch 4/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 305s 975ms/step - accuracy: 0.4221 - loss: 1.5685 - val_accuracy: 0.4188 - val_loss: 1.5894
+313/313 ━━━━━━━━━━━━━━━━━━━━ 310s 989ms/step - accuracy: 0.4221 - loss: 1.5685 - val_accuracy: 0.4188 - val_loss: 1.5894
 
 Epoch 5/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 301s 961ms/step - accuracy: 0.4618 - loss: 1.4759 - val_accuracy: 0.4519 - val_loss: 1.5107
+313/313 ━━━━━━━━━━━━━━━━━━━━ 301s 960ms/step - accuracy: 0.4618 - loss: 1.4759 - val_accuracy: 0.4519 - val_loss: 1.5107
 
 Epoch 6/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 308s 984ms/step - accuracy: 0.4943 - loss: 1.3977 - val_accuracy: 0.4743 - val_loss: 1.5007
+313/313 ━━━━━━━━━━━━━━━━━━━━ 311s 993ms/step - accuracy: 0.4943 - loss: 1.3977 - val_accuracy: 0.4743 - val_loss: 1.5007
 
 Epoch 7/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 304s 971ms/step - accuracy: 0.5185 - loss: 1.3445 - val_accuracy: 0.5042 - val_loss: 1.3920
+313/313 ━━━━━━━━━━━━━━━━━━━━ 305s 973ms/step - accuracy: 0.5185 - loss: 1.3445 - val_accuracy: 0.5042 - val_loss: 1.3920
 
 Epoch 8/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 308s 985ms/step - accuracy: 0.5350 - loss: 1.3001 - val_accuracy: 0.5192 - val_loss: 1.3544
+313/313 ━━━━━━━━━━━━━━━━━━━━ 302s 966ms/step - accuracy: 0.5350 - loss: 1.3001 - val_accuracy: 0.5192 - val_loss: 1.3544
 
 Epoch 9/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 308s 984ms/step - accuracy: 0.5451 - loss: 1.2637 - val_accuracy: 0.5247 - val_loss: 1.3289
+313/313 ━━━━━━━━━━━━━━━━━━━━ 302s 965ms/step - accuracy: 0.5451 - loss: 1.2637 - val_accuracy: 0.5247 - val_loss: 1.3289
 
 Epoch 10/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 306s 976ms/step - accuracy: 0.5607 - loss: 1.2300 - val_accuracy: 0.5312 - val_loss: 1.3112
+313/313 ━━━━━━━━━━━━━━━━━━━━ 305s 974ms/step - accuracy: 0.5607 - loss: 1.2300 - val_accuracy: 0.5312 - val_loss: 1.3112
 
 Epoch 11/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 299s 956ms/step - accuracy: 0.5730 - loss: 1.1985 - val_accuracy: 0.5354 - val_loss: 1.3262
+313/313 ━━━━━━━━━━━━━━━━━━━━ 298s 953ms/step - accuracy: 0.5730 - loss: 1.1985 - val_accuracy: 0.5354 - val_loss: 1.3262
 
 Epoch 12/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 304s 970ms/step - accuracy: 0.5802 - loss: 1.1739 - val_accuracy: 0.5484 - val_loss: 1.2850
+313/313 ━━━━━━━━━━━━━━━━━━━━ 300s 959ms/step - accuracy: 0.5802 - loss: 1.1739 - val_accuracy: 0.5484 - val_loss: 1.2850
 
 Epoch 13/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 312s 996ms/step - accuracy: 0.5905 - loss: 1.1494 - val_accuracy: 0.5640 - val_loss: 1.2334
+313/313 ━━━━━━━━━━━━━━━━━━━━ 303s 966ms/step - accuracy: 0.5905 - loss: 1.1494 - val_accuracy: 0.5640 - val_loss: 1.2334
 
 Epoch 14/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 307s 982ms/step - accuracy: 0.5973 - loss: 1.1309 - val_accuracy: 0.5641 - val_loss: 1.2307
+313/313 ━━━━━━━━━━━━━━━━━━━━ 305s 973ms/step - accuracy: 0.5973 - loss: 1.1309 - val_accuracy: 0.5641 - val_loss: 1.2307
 
 Epoch 15/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 313s 999ms/step - accuracy: 0.6072 - loss: 1.1127 - val_accuracy: 0.5740 - val_loss: 1.2129
+313/313 ━━━━━━━━━━━━━━━━━━━━ 298s 952ms/step - accuracy: 0.6072 - loss: 1.1127 - val_accuracy: 0.5740 - val_loss: 1.2129
 
 Epoch 16/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 311s 992ms/step - accuracy: 0.6120 - loss: 1.0956 - val_accuracy: 0.5734 - val_loss: 1.2059
+313/313 ━━━━━━━━━━━━━━━━━━━━ 300s 957ms/step - accuracy: 0.6120 - loss: 1.0956 - val_accuracy: 0.5734 - val_loss: 1.2059
 
 Epoch 17/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 5871s 19s/step - accuracy: 0.6145 - loss: 1.0874 - val_accuracy: 0.5788 - val_loss: 1.1996
+313/313 ━━━━━━━━━━━━━━━━━━━━ 301s 961ms/step - accuracy: 0.6145 - loss: 1.0874 - val_accuracy: 0.5788 - val_loss: 1.1996
 
 Epoch 18/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 300s 959ms/step - accuracy: 0.6164 - loss: 1.0800 - val_accuracy: 0.5797 - val_loss: 1.1991
+313/313 ━━━━━━━━━━━━━━━━━━━━ 304s 970ms/step - accuracy: 0.6164 - loss: 1.0800 - val_accuracy: 0.5797 - val_loss: 1.1991
 
 Epoch 19/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 297s 950ms/step - accuracy: 0.6212 - loss: 1.0737 - val_accuracy: 0.5828 - val_loss: 1.1924
+313/313 ━━━━━━━━━━━━━━━━━━━━ 299s 956ms/step - accuracy: 0.6212 - loss: 1.0737 - val_accuracy: 0.5828 - val_loss: 1.1924
 
 Epoch 20/20
 
-313/313 ━━━━━━━━━━━━━━━━━━━━ 297s 950ms/step - accuracy: 0.6204 - loss: 1.0702 - val_accuracy: 0.5822 - val_loss: 1.1950
+313/313 ━━━━━━━━━━━━━━━━━━━━ 298s 954ms/step - accuracy: 0.6204 - loss: 1.0702 - val_accuracy: 0.5822 - val_loss: 1.1950
 ```
 </div>
 
@@ -971,7 +944,7 @@ plt.show()
 
 
     
-![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_35_0.png)
+![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_33_0.png)
     
 
 
@@ -1004,31 +977,31 @@ for row in range(5):
 
 
     
-![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_37_0.png)
+![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_35_0.png)
     
 
 
 
     
-![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_37_1.png)
+![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_35_1.png)
     
 
 
 
     
-![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_37_2.png)
+![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_35_2.png)
     
 
 
 
     
-![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_37_3.png)
+![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_35_3.png)
     
 
 
 
     
-![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_37_4.png)
+![png](/img/examples/vision/focal_modulation_network/focal_modulation_network_35_4.png)
     
 
 
