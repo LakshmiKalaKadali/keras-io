@@ -90,7 +90,7 @@ class VectorQuantizer(layers.Layer):
         super().__init__(**kwargs)
         self.embedding_dim = embedding_dim
         self.num_embeddings = num_embeddings
-        self.beta = beta
+        self.beta = beta  # The `beta` parameter is best kept between [0.25, 2] as per the paper.
 
         # Initialize the embeddings codebook
         self.embeddings = self.add_weight(
@@ -139,8 +139,8 @@ This line of code implements the straight-through estimator: quantized = x + ops
 In the forward pass, the terms cancel out (x+quantized−x), and the layer outputs the discrete quantized vectors.
 In the backward pass, since the gradient of ops.stop_gradient is zero,
 the gradient of the loss with respect to the output is effectively copied directly
-to the input x (the encoder's output).This allows the model to bypass the non-differentiable quantization step
-and train the encoder using the decoder's gradients.. Thanks to [this video](https://youtu.be/VZFVUrYcig0?t=1393)
+to the input x (the encoder's output). This allows the model to bypass the non-differentiable quantization step
+and train the encoder using the decoder's gradients. Thanks to [this video](https://youtu.be/VZFVUrYcig0?t=1393)
 for helping me understand this technique.
 """
 
@@ -245,7 +245,6 @@ class VQVAETrainer(keras.Model):
         # y_pred is now [reconstructions, indices]
         reconstructions = y_pred[0]
 
-        # Rule 6: Stability
         reconstruction_loss = ops.mean((x - reconstructions) ** 2) / (
             self.train_variance + 1e-7
         )
@@ -267,7 +266,6 @@ class VQVAETrainer(keras.Model):
 x_train = np.expand_dims(x_train, -1).astype("float32")
 x_test = np.expand_dims(x_test, -1).astype("float32")
 
-# Integrated Preprocessing (Rule 4)
 x_train_scaled = (x_train / 255.0) - 0.5
 x_test_scaled = (x_test / 255.0) - 0.5
 data_variance = np.var(x_train / 255.0)
